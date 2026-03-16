@@ -9,7 +9,7 @@ from core.hand_tracker import HandTracker
 from effects.lightning_effect import LightningOrb, LightningBeam
 
 PUSH_SPEED    = 7.0    # hadouken için el hızı eşiği
-STACK_DIST    = 200    # eller bu kadar yakınsa "üst üste" sayılır
+STACK_DIST    = 400    # eller bu kadar yakınsa "üst üste" sayılır
 
 def is_hands_stacked(lx, ly, rx, ry):
     """İki el birbirine yakın mı? (üst üste veya yan yana)"""
