@@ -7,9 +7,13 @@ from collections import deque
 from core.camera import Camera
 from core.hand_tracker import HandTracker
 from effects.lightning_effect import LightningOrb, LightningBeam
+from effects.fire_effect import FireEffect
 
-PUSH_SPEED    = 7.0    # hadouken için el hızı eşiği
+PUSH_SPEED    = 5.0    # hadouken için el hızı eşiği (düşürüldü, yatay itmeleri yakalamak için)
 STACK_DIST    = 400    # eller bu kadar yakınsa "üst üste" sayılır
+
+# Modlar: 1=HADOUKEN, 2=FIRE
+MODES = ["HADOUKEN", "FIRE"]
 
 def is_hands_stacked(lx, ly, rx, ry):
     """İki el birbirine yakın mı? (üst üste veya yan yana)"""
@@ -53,9 +57,11 @@ def main():
     camera   = Camera(index=0)
     tracker  = HandTracker(max_hands=2)
     orb      = LightningOrb()
+    fire     = FireEffect()
     beams    = []
     vel      = {"Left": HandVelocity(), "Right": HandVelocity()}
     cooldown = 0
+    mode = 0
 
     camera.start()
     prev_time = time.time()
@@ -82,6 +88,11 @@ def main():
         if cooldown > 0:
             cooldown -= 1
 
+        # Varsayılan değerler — olmayan ellerde referans hatası olmaması için
+        fast_push = False
+        l_push = False
+        r_push = False
+
         if left and right:
             lx, ly, llm = left
             rx, ry, rlm = right
@@ -91,9 +102,13 @@ def main():
             r_push     = is_push_pose(rlm)
             l_speed    = vel["Left"].speed()
             r_speed    = vel["Right"].speed()
-            fast_push  = l_speed > PUSH_SPEED and r_speed > PUSH_SPEED
+            # Daha sağlam itme tespiti: hem yeterli hız hem de ellerin benzer yönde hareket etmesi
+            ldx, ldy = vel["Left"].direction()
+            rdx, rdy = vel["Right"].direction()
+            dot = ldx * rdx + ldy * rdy
+            fast_push  = (l_speed > PUSH_SPEED and r_speed > PUSH_SPEED and dot > 0.45)
 
-            if fast_push and l_push and r_push and orb.charge > 25 and cooldown <= 0:
+            if mode == 0 and fast_push and l_push and r_push and orb.charge > 25 and cooldown <= 0:
                 # HADOUKEN — iki elin ortalama hareket yönüne fırlat
                 ldx, ldy = vel["Left"].direction()
                 rdx, rdy = vel["Right"].direction()
@@ -111,10 +126,17 @@ def main():
                 print(f"⚡ HADOUKEN! ({fx/fd:.2f}, {fy/fd:.2f})")
 
             elif stacked and not fast_push:
-                # Şarj
-                orb.charge_up(lx, ly, rx, ry)
+                # Şarj (mode'a göre farklı efekt)
+                if mode == 0:
+                    orb.charge_up(lx, ly, rx, ry)
+                elif mode == 1:
+                    # Ateş modu: iki el arasına ateş topu spawn et
+                    cx = int((lx + rx) / 2)
+                    cy = int((ly + ry) / 2)
+                    fire.spawn(cx, cy)
             else:
                 orb.reset()
+                fire.reset()
 
             # El göstergeleri
             for name, (ex, ey, elm) in hands.items():
@@ -123,8 +145,8 @@ def main():
                 col  = (0, 200, 255) if push else (120, 120, 120)
                 cv2.circle(frame, (ex, ey), 10, col, -1)
 
-            # Şarj çizgisi
-            if orb.active and orb.charge > 5:
+            # Şarj çizgisi (sadece hadouken modunda)
+            if mode == 0 and orb.active and orb.charge > 5:
                 ov = frame.copy()
                 cv2.line(ov, (lx,ly), (rx,ry), (255,200,50), 2)
                 frame = cv2.addWeighted(frame, 1 - orb.ratio*0.35,
@@ -138,28 +160,49 @@ def main():
         tracker.draw_landmarks(frame, results)
 
         orb.update()
+        fire.update()
         lp = (left[0],  left[1])  if left  else (None, None)
         rp = (right[0], right[1]) if right else (None, None)
-        frame = orb.draw(frame, lp[0], lp[1], rp[0], rp[1])
+        if mode == 0:
+            frame = orb.draw(frame, lp[0], lp[1], rp[0], rp[1])
+        elif mode == 1:
+            frame = fire.draw(frame)
 
         for b in beams:
             b.update()
             frame = b.draw(frame)
         beams = [b for b in beams if b.is_alive]
 
+        # Fire modu: eğer şarj dolmuşsa ve güçlü bir itme varsa topu fırlat
+        if mode == 1 and fast_push and l_push and r_push and len(fire.system) > 0:
+            # ortalama yön ile fırlat
+            ldx, ldy = vel["Left"].direction()
+            rdx, rdy = vel["Right"].direction()
+            fx = (ldx + rdx) / 2
+            fy = (ldy + rdy) / 2
+            fd = math.sqrt(fx*fx + fy*fy) or 1
+            fire.launch((lp[0] or orb.cx), (lp[1] or orb.cy), fx/fd * 18, fy/fd * 18)
+            cooldown = 45
+
         now = time.time()
         fps = 1.0 / (now - prev_time + 1e-9)
         prev_time = now
         cv2.putText(frame, f"FPS: {fps:.1f}", (10, 35),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
-        cv2.putText(frame,
-                    "Elleri ust uste getir=sarj | Avuclari one it=HADOUKEN | Q=cikis",
+        # Mode göstergesi ve kısa ipuçları
+        mode_lbl = MODES[mode]
+        cv2.putText(frame, f"Mod: {mode_lbl} | 1=HADOUKEN 2=FIRE | Q=cikis",
                     (10, h-15), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180,180,180), 1)
 
         cv2.imshow("handmagic - HADOUKEN", frame)
-        if cv2.waitKey(1) & 0xFF == ord("q"):
+        # Tuşlarla mod geçişi (imshow'dan sonra)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
             break
-
+        elif key == ord('1'):
+            mode = 0
+        elif key == ord('2'):
+            mode = 1
     camera.release()
     cv2.destroyAllWindows()
 
